@@ -1,0 +1,25 @@
+# tempmon config
+#
+# Copy to /etc/tempmon/config.txt (install_tempmon.sh does this
+# automatically on first install if the file does not already exist).
+#
+# THRESHOLD_C          temperature in Celsius that triggers a wall broadcast
+# POLL_INTERVAL_SEC     how often to check the temperature, in seconds
+# REPEAT_INTERVAL_SEC   minimum seconds between repeat alerts while the
+#                       board stays above threshold, prevents a wall
+#                       message on every poll cycle while it stays hot
+#
+# Edited values take effect on the next poll cycle, no service restart
+# needed, tempmon re-reads this file every loop iteration.
+
+# NOTIFICATION_TYPE
+# 0  no notif, just logs
+# 1  txt messages in all tty
+# 2  gui notification (make sure xeyes works)
+# 3  both
+
+THRESHOLD_C=75
+POLL_INTERVAL_SEC=5
+REPEAT_INTERVAL_SEC=300
+NOTIFICATION_TYPE=1
+NOTIFICATION_QTNOTIFIER=/bin/qtnotifier
