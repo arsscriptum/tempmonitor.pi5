@@ -3,23 +3,43 @@
 # Copy to /etc/tempmon/config.txt (install_tempmon.sh does this
 # automatically on first install if the file does not already exist).
 #
-# THRESHOLD_C          temperature in Celsius that triggers a wall broadcast
+# THRESHOLD_C           temperature in Celsius that triggers a wall broadcast
 # POLL_INTERVAL_SEC     how often to check the temperature, in seconds
 # REPEAT_INTERVAL_SEC   minimum seconds between repeat alerts while the
 #                       board stays above threshold, prevents a wall
 #                       message on every poll cycle while it stays hot
+# RUN_DIR               directory for the run files, must be an absolute
+#                       path. tempmon writes the current, minimum, maximum
+#                       and average temperature there every poll cycle:
+#
+#                         $RUN_DIR/temp_cur     current temperature, C
+#                         $RUN_DIR/temp_min     lowest seen this window
+#                         $RUN_DIR/temp_max     highest seen this window
+#                         $RUN_DIR/temp_avg     mean of all samples
+#                         $RUN_DIR/temp_state   sample count, epochs, state
+#
+#                       One bare number per file, mode 0644 so any user can
+#                       read them. Report them with: tempstats
+#                       Leave this at the default unless you have a reason
+#                       to move it, the systemd unit creates /run/tempmon.
 #
 # Edited values take effect on the next poll cycle, no service restart
-# needed, tempmon re-reads this file every loop iteration.
+# needed, tempmon re-reads this file every loop iteration. A value that is
+# not a valid number is ignored and the built-in default is used instead.
 
 # NOTIFICATION_TYPE
 # 0  no notif, just logs
 # 1  txt messages in all tty
 # 2  gui notification (make sure xeyes works)
 # 3  both
+#
+# NOTE: NOTIFICATION_TYPE and NOTIFICATION_QTNOTIFIER are not implemented
+# in tempmon.sh yet, it always uses wall. They are kept here as a
+# placeholder for that work.
 
 THRESHOLD_C=75
 POLL_INTERVAL_SEC=5
 REPEAT_INTERVAL_SEC=300
+RUN_DIR=/run/tempmon
 NOTIFICATION_TYPE=1
 NOTIFICATION_QTNOTIFIER=/bin/qtnotifier

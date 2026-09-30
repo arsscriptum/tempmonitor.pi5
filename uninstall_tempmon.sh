@@ -2,7 +2,8 @@
 #
 # uninstall_tempmon.sh
 #
-# Removes the tempmon service, daemon script, and systemd unit.
+# Removes the tempmon service, daemon script, stats script, systemd unit
+# and the runtime directory.
 # Config file (/etc/tempmon/config.txt) is kept by default so a threshold
 # you tuned survives a reinstall, pass --purge to remove it too.
 #
@@ -13,7 +14,10 @@ set -euo pipefail
 
 CONFIG_DIR="/etc/tempmon"
 DAEMON_DST="/usr/local/sbin/tempmon.sh"
+STATS_DST="/usr/local/sbin/tempstats.sh"
+STATS_LINK="/usr/local/sbin/tempstats"
 SERVICE_FILE="/etc/systemd/system/tempmon.service"
+RUN_DIR="/run/tempmon"
 PURGE=0
 
 for arg in "$@"; do
@@ -43,9 +47,18 @@ if [[ -f "$SERVICE_FILE" ]]; then
     systemctl daemon-reload
 fi
 
-if [[ -f "$DAEMON_DST" ]]; then
-    echo "==> removing $DAEMON_DST"
-    rm -f "$DAEMON_DST"
+for path in "$DAEMON_DST" "$STATS_DST" "$STATS_LINK"; do
+    if [[ -e "$path" || -L "$path" ]]; then
+        echo "==> removing $path"
+        rm -f "$path"
+    fi
+done
+
+# systemd normally removes this with the service (RuntimeDirectory), clean
+# up anything left behind by a standalone run of tempmon.sh.
+if [[ -d "$RUN_DIR" ]]; then
+    echo "==> removing $RUN_DIR"
+    rm -rf "$RUN_DIR"
 fi
 
 if [[ "$PURGE" -eq 1 ]]; then
