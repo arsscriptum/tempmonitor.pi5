@@ -23,6 +23,12 @@
 #                       wall message on every poll cycle
 # RUN_DIR               directory for the runtime files below
 #
+# NOTIFICATION_TYPE
+#       0  no notif, just logs
+#       1  txt messages in all tty
+#       2  gui notification (make sure xeyes works)
+#       3  both
+
 # Config is re-read every poll cycle, so editing the threshold live takes
 # effect without restarting the service. Values that are not valid numbers
 # are ignored and the built-in default is used instead.
@@ -55,6 +61,8 @@ CONFIG_FILE="/etc/tempmon/config.txt"
 DEFAULT_THRESHOLD_C=75
 DEFAULT_POLL_INTERVAL_SEC=5
 DEFAULT_REPEAT_INTERVAL_SEC=300
+DEFAULT_NOTIFICATION_TYPE=1
+DEFAULT_NOTIFICATION_QTNOTIFIER=/bin/qtnotifier
 DEFAULT_RUN_DIR="/run/tempmon"
 
 # Accumulators for the current min/max/average window.
@@ -85,6 +93,9 @@ read_config() {
     POLL_INTERVAL_SEC="$DEFAULT_POLL_INTERVAL_SEC"
     REPEAT_INTERVAL_SEC="$DEFAULT_REPEAT_INTERVAL_SEC"
     RUN_DIR="$DEFAULT_RUN_DIR"
+    NOTIFICATION_TYPE="$DEFAULT_NOTIFICATION_TYPE"
+    NOTIFICATION_QTNOTIFIER="$DEFAULT_NOTIFICATION_QTNOTIFIER"
+
 
     if [[ -f "$CONFIG_FILE" ]]; then
         while IFS= read -r line || [[ -n "$line" ]]; do
@@ -110,6 +121,7 @@ read_config() {
             esac
         done < "$CONFIG_FILE"
     else
+
         log "config file $CONFIG_FILE not found, using defaults"
     fi
 
@@ -117,6 +129,21 @@ read_config() {
     if [[ -n "${TEMPMON_RUN_DIR:-}" ]]; then
         RUN_DIR="$TEMPMON_RUN_DIR"
     fi
+
+
+        key="${line%%=*}"
+        value="${line#*=}"
+        key="$(echo "$key" | xargs)"
+        value="$(echo "$value" | xargs)"
+
+        case "$key" in
+            THRESHOLD_C)        THRESHOLD_C="$value" ;;
+            POLL_INTERVAL_SEC)  POLL_INTERVAL_SEC="$value" ;;
+            REPEAT_INTERVAL_SEC) REPEAT_INTERVAL_SEC="$value" ;;
+            NOTIFICATION_TYPE) NOTIFICATION_TYPE="$value" ;;
+            NOTIFICATION_QTNOTIFIER) NOTIFICATION_QTNOTIFIER="$value" ;;
+        esac
+    done < "$CONFIG_FILE"
 
     CUR_FILE="$RUN_DIR/temp_cur"
     MIN_FILE="$RUN_DIR/temp_min"
@@ -315,6 +342,45 @@ broadcast() {
     fi
 }
 
+gui_broadcast() {
+    local message="$1"
+
+    if command -v wall >/dev/null 2>&1; then
+        wall "$message"
+    else
+        log "wall not available, message not broadcast: $message"
+    fi
+}
+
+
+temp_raise_alarm() {
+    local temp="$1"
+    local threshold="$2"
+    local hostname="$3"
+    local type="$4"
+    local ret
+
+    ret=0
+    log "alert sent, temp=${temp}C threshold=${THRESHOLD_C}C"
+
+    if [[ "$type" == "0" ]]; then
+        ret=0
+    elif  [[ "$type" == "1" ]]; then
+        broadcast "$(printf 'TEMPERATURE WARNING on %s: %s C, threshold %s C exceeded at %s' "$(hostname)" "$temp" "$THRESHOLD_C" "$(date '+%Y-%m-%d %H:%M:%S')")"
+        ret=1
+    elif  [[ "$type" == "2" ]]; then
+        gui_broadcast "$(printf 'TEMPERATURE WARNING on %s: %s C, threshold %s C exceeded at %s' "$(hostname)" "$temp" "$THRESHOLD_C" "$(date '+%Y-%m-%d %H:%M:%S')")"
+        ret=1
+    elif  [[ "$type" == "3" ]]; then
+        broadcast "$(printf 'TEMPERATURE WARNING on %s: %s C, threshold %s C exceeded at %s' "$(hostname)" "$temp" "$THRESHOLD_C" "$(date '+%Y-%m-%d %H:%M:%S')")"
+        ret=1
+    fi
+    
+    
+    last_alert_epoch="$now"
+    return $ret
+}
+
 cleanup() {
     log "stopping"
     exit 0
@@ -359,10 +425,9 @@ main() {
 
         if temp_ge_threshold "$temp" "$THRESHOLD_C"; then
             if [[ "$alerted" -eq 0 ]] || (( now - last_alert_epoch >= REPEAT_INTERVAL_SEC )); then
-                broadcast "$(printf 'TEMPERATURE WARNING on %s: %s C, threshold %s C exceeded at %s' "$(hostname)" "$temp" "$THRESHOLD_C" "$(date '+%Y-%m-%d %H:%M:%S')")"
-                log "alert sent, temp=${temp}C threshold=${THRESHOLD_C}C"
-                last_alert_epoch="$now"
-                alerted=1
+
+                
+                alerted=$(temp_raise_alarm "$temp" "$THRESHOLD_C" "$(date '+%Y-%m-%d %H:%M:%S')" "$NOTIFICATION_TYPE")
             fi
         else
             if [[ "$alerted" -eq 1 ]]; then
