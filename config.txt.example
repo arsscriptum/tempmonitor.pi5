@@ -3,11 +3,11 @@
 # Copy to /etc/tempmon/config.txt (install_tempmon.sh does this
 # automatically on first install if the file does not already exist).
 #
-# THRESHOLD_C           temperature in Celsius that triggers a wall broadcast
+# THRESHOLD_C           temperature in Celsius that triggers an alert
 # POLL_INTERVAL_SEC     how often to check the temperature, in seconds
 # REPEAT_INTERVAL_SEC   minimum seconds between repeat alerts while the
-#                       board stays above threshold, prevents a wall
-#                       message on every poll cycle while it stays hot
+#                       board stays above threshold, prevents an alert
+#                       on every poll cycle while it stays hot
 # RUN_DIR               directory for the run files, must be an absolute
 #                       path. tempmon writes the current, minimum, maximum
 #                       and average temperature there every poll cycle:
@@ -23,19 +23,45 @@
 #                       Leave this at the default unless you have a reason
 #                       to move it, the systemd unit creates /run/tempmon.
 #
+# NOTIFICATION_TYPE     where alerts go. Two bit field, bit 0 is tty and
+#                       bit 1 is desktop, so:
+#
+#                         0  no notification, log only
+#                         1  text message on every tty (wall)
+#                         2  desktop notification in every graphical session
+#                         3  both
+#
+#                       Type 0 still logs every threshold crossing, so
+#                       journalctl -u tempmon stays a full record either way.
+#                       A value outside 0-3 is ignored.
+#
+# NOTIFICATION_QTNOTIFIER
+#                       absolute path to a desktop notifier binary, used by
+#                       type 2 and 3, called as:
+#
+#                         <notifier> "<title>" "<message>"
+#
+#                       If that path is not executable tempmon falls back to
+#                       notify-send (apt install libnotify-bin), called as:
+#
+#                         notify-send -a tempmon -u <urgency> "<title>" "<msg>"
+#
+#                       If neither exists the desktop half of the alert is
+#                       skipped and a warning is logged once.
+#
+#                       Desktop alerts are delivered per session: tempmon
+#                       walks every active x11/wayland session from loginctl
+#                       and runs the notifier as that user with DISPLAY,
+#                       XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS set for
+#                       that session. On a headless box there is no such
+#                       session, so use type 1.
+#
+#                       Check it without heating the board:
+#                         sudo tempmon.sh --test-notify
+#
 # Edited values take effect on the next poll cycle, no service restart
 # needed, tempmon re-reads this file every loop iteration. A value that is
-# not a valid number is ignored and the built-in default is used instead.
-
-# NOTIFICATION_TYPE
-# 0  no notif, just logs
-# 1  txt messages in all tty
-# 2  gui notification (make sure xeyes works)
-# 3  both
-#
-# NOTE: NOTIFICATION_TYPE and NOTIFICATION_QTNOTIFIER are not implemented
-# in tempmon.sh yet, it always uses wall. They are kept here as a
-# placeholder for that work.
+# not valid is ignored and the built-in default is used instead.
 
 THRESHOLD_C=75
 POLL_INTERVAL_SEC=5

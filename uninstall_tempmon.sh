@@ -12,6 +12,7 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="/etc/tempmon"
 DAEMON_DST="/usr/local/sbin/tempmon.sh"
 STATS_DST="/usr/local/sbin/tempstats.sh"
@@ -31,7 +32,7 @@ for arg in "$@"; do
 done
 
 if [[ "$(id -u)" -ne 0 ]]; then
-    echo "run as root (sudo ./uninstall_tempmon.sh)" >&2
+    echo "run as root (sudo $SCRIPT_DIR/uninstall_tempmon.sh)" >&2
     exit 1
 fi
 

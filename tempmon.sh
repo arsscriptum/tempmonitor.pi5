@@ -2,11 +2,13 @@
 #
 # tempmon.sh
 #
-# Polls board temperature and broadcasts a wall message to every logged-in
-# tty when it crosses the threshold set in /etc/tempmon/config.txt, the same
-# way shutdown/reboot broadcasts a warning to all terminals. Meant to run as
-# a systemd service (tempmon.service), installed by install_tempmon.sh, but
-# also runs standalone in the foreground for testing.
+# Polls board temperature and raises an alert when it crosses the threshold
+# set in /etc/tempmon/config.txt. Depending on NOTIFICATION_TYPE the alert
+# goes to every logged-in tty (the way shutdown/reboot warns all terminals),
+# to every active graphical session as a desktop notification, to both, or
+# nowhere at all (log only). Meant to run as a systemd service
+# (tempmon.service), installed by install_tempmon.sh, but also runs
+# standalone in the foreground for testing.
 #
 # Config file format (/etc/tempmon/config.txt), key=value, one per line,
 # blank lines and lines starting with # ignored:
@@ -15,23 +17,54 @@
 #   POLL_INTERVAL_SEC=5
 #   REPEAT_INTERVAL_SEC=300
 #   RUN_DIR=/run/tempmon
+#   NOTIFICATION_TYPE=1
+#   NOTIFICATION_QTNOTIFIER=/bin/qtnotifier
 #
-# THRESHOLD_C           temperature in Celsius that triggers a broadcast
+# THRESHOLD_C           temperature in Celsius that triggers an alert
 # POLL_INTERVAL_SEC     how often to check the temperature
 # REPEAT_INTERVAL_SEC   minimum seconds between repeat alerts while the
 #                       board stays above threshold, prevents spamming a
-#                       wall message on every poll cycle
+#                       notification on every poll cycle
 # RUN_DIR               directory for the runtime files below
 #
-# NOTIFICATION_TYPE
-#       0  no notif, just logs
-#       1  txt messages in all tty
-#       2  gui notification (make sure xeyes works)
-#       3  both
-
-# Config is re-read every poll cycle, so editing the threshold live takes
-# effect without restarting the service. Values that are not valid numbers
-# are ignored and the built-in default is used instead.
+# NOTIFICATION_TYPE     where alerts go. Two bit field, bit 0 is tty, bit 1
+#                       is desktop, so:
+#
+#                         0  no notification, log only
+#                         1  text message on every tty (wall)
+#                         2  desktop notification in every graphical session
+#                         3  both
+#
+#                       Anything outside 0-3 is ignored and the default is
+#                       used. Type 0 still logs every threshold crossing, so
+#                       journalctl -u tempmon remains a full record.
+#
+# NOTIFICATION_QTNOTIFIER
+#                       absolute path to a desktop notifier binary, used for
+#                       type 2 and 3. Called as:
+#
+#                         <notifier> "<title>" "<message>"
+#
+#                       If that path is not executable tempmon falls back to
+#                       notify-send, called as:
+#
+#                         notify-send -a tempmon -u <urgency> "<title>" "<msg>"
+#
+#                       If neither exists the desktop half of the alert is
+#                       skipped and a warning is logged once. Install
+#                       libnotify-bin to get notify-send.
+#
+# Desktop notifications are delivered per session: tempmon walks every
+# active x11/wayland session reported by loginctl and runs the notifier as
+# that session's user with DISPLAY, XDG_RUNTIME_DIR and
+# DBUS_SESSION_BUS_ADDRESS pointing at that session. Running as root (the
+# service does) this needs runuser or sudo. Running as a normal user only
+# your own sessions are reachable, which is what you want for testing.
+#
+# Config is re-read every poll cycle, so editing the threshold or the
+# notification type live takes effect without restarting the service.
+# Values that are not valid are ignored and the built-in default is used
+# instead.
 #
 # Runtime (run) files, rewritten every poll cycle, world readable (0644):
 #
@@ -54,6 +87,14 @@
 # running the daemon as a normal user during testing:
 #
 #   TEMPMON_RUN_DIR=/tmp/tempmon ./tempmon.sh
+#
+# Usage:
+#   tempmon.sh                 poll forever (the service entry point)
+#   tempmon.sh --test-notify   send one test alert through the configured
+#                              NOTIFICATION_TYPE and exit, no polling. Use
+#                              this to verify notifications without waiting
+#                              for the board to get hot.
+#   tempmon.sh --help
 
 set -uo pipefail
 
@@ -65,6 +106,10 @@ DEFAULT_NOTIFICATION_TYPE=1
 DEFAULT_NOTIFICATION_QTNOTIFIER=/bin/qtnotifier
 DEFAULT_RUN_DIR="/run/tempmon"
 
+# Bits of NOTIFICATION_TYPE. 3 is simply TTY|GUI.
+NOTIFY_BIT_TTY=1
+NOTIFY_BIT_GUI=2
+
 # Accumulators for the current min/max/average window.
 STAT_SAMPLES=0
 STAT_SUM=0
@@ -75,6 +120,18 @@ STAT_MIN_EPOCH=0
 STAT_MAX_EPOCH=0
 STAT_START_EPOCH=0
 RUN_DIR_READY=""
+
+# Alert state, global so the repeat throttle survives across poll cycles.
+# (These used to be assigned inside a command substitution, where the
+# assignment was lost with the subshell and the throttle never worked.)
+ALERTED=0
+LAST_ALERT_EPOCH=0
+
+# Set once we have logged that no desktop notifier exists, so a misconfigured
+# notifier does not fill the journal with one warning per alert.
+GUI_WARNED=0
+
+HOST_NAME="$(hostname 2>/dev/null || echo unknown)"
 
 log() {
     echo "tempmon: $1"
@@ -96,7 +153,6 @@ read_config() {
     NOTIFICATION_TYPE="$DEFAULT_NOTIFICATION_TYPE"
     NOTIFICATION_QTNOTIFIER="$DEFAULT_NOTIFICATION_QTNOTIFIER"
 
-
     if [[ -f "$CONFIG_FILE" ]]; then
         while IFS= read -r line || [[ -n "$line" ]]; do
             line="${line%%#*}"
@@ -115,13 +171,18 @@ read_config() {
                     is_number "$value" && (( $(printf '%.0f' "$value") > 0 )) \
                         && POLL_INTERVAL_SEC="$value" ;;
                 REPEAT_INTERVAL_SEC)
-                    is_number "$value" && REPEAT_INTERVAL_SEC="$value" ;;
+                    # Normalised to an integer, it is used in (( )) below.
+                    is_number "$value" \
+                        && REPEAT_INTERVAL_SEC="$(printf '%.0f' "$value")" ;;
                 RUN_DIR)
                     [[ "$value" == /* ]] && RUN_DIR="$value" ;;
+                NOTIFICATION_TYPE)
+                    [[ "$value" =~ ^[0-3]$ ]] && NOTIFICATION_TYPE="$value" ;;
+                NOTIFICATION_QTNOTIFIER)
+                    [[ "$value" == /* ]] && NOTIFICATION_QTNOTIFIER="$value" ;;
             esac
         done < "$CONFIG_FILE"
     else
-
         log "config file $CONFIG_FILE not found, using defaults"
     fi
 
@@ -129,21 +190,6 @@ read_config() {
     if [[ -n "${TEMPMON_RUN_DIR:-}" ]]; then
         RUN_DIR="$TEMPMON_RUN_DIR"
     fi
-
-
-        key="${line%%=*}"
-        value="${line#*=}"
-        key="$(echo "$key" | xargs)"
-        value="$(echo "$value" | xargs)"
-
-        case "$key" in
-            THRESHOLD_C)        THRESHOLD_C="$value" ;;
-            POLL_INTERVAL_SEC)  POLL_INTERVAL_SEC="$value" ;;
-            REPEAT_INTERVAL_SEC) REPEAT_INTERVAL_SEC="$value" ;;
-            NOTIFICATION_TYPE) NOTIFICATION_TYPE="$value" ;;
-            NOTIFICATION_QTNOTIFIER) NOTIFICATION_QTNOTIFIER="$value" ;;
-        esac
-    done < "$CONFIG_FILE"
 
     CUR_FILE="$RUN_DIR/temp_cur"
     MIN_FILE="$RUN_DIR/temp_min"
@@ -327,58 +373,275 @@ MIN_EPOCH=$STAT_MIN_EPOCH
 MAX_EPOCH=$STAT_MAX_EPOCH
 THRESHOLD_C=$THRESHOLD_C
 POLL_INTERVAL_SEC=$POLL_INTERVAL_SEC
+NOTIFICATION_TYPE=$NOTIFICATION_TYPE
 ALERTED=$alerted
-HOSTNAME=$(hostname)
+HOSTNAME=$HOST_NAME
 PID=$$"
 }
 
-broadcast() {
-    local message="$1"
+# ---------------------------------------------------------------------------
+# Notifications
+#
+# notify() is the single entry point. It takes a title, a detail line and an
+# urgency, then fans out to whichever channels NOTIFICATION_TYPE selects.
+# Every caller goes through it, so alerts and recoveries always honour the
+# configured type.
+# ---------------------------------------------------------------------------
 
-    if command -v wall >/dev/null 2>&1; then
-        wall "$message"
-    else
-        log "wall not available, message not broadcast: $message"
-    fi
+# True when NOTIFICATION_TYPE has the given bit set. Type 3 has both.
+notify_wants() {
+    local bit="$1"
+
+    [[ "$NOTIFICATION_TYPE" =~ ^[0-9]+$ ]] || return 1
+    (( (NOTIFICATION_TYPE & bit) != 0 ))
 }
 
-gui_broadcast() {
-    local message="$1"
+# Broadcast to every tty, the way shutdown warns all terminals.
+tty_notify() {
+    local title="$1"
+    local detail="$2"
 
-    if command -v wall >/dev/null 2>&1; then
-        wall "$message"
-    else
-        log "wall not available, message not broadcast: $message"
+    if ! command -v wall >/dev/null 2>&1; then
+        log "wall not available, tty notification skipped"
+        return 1
     fi
+
+    # -n needs root and drops the banner, harmless to lose if unprivileged.
+    wall -n "$title: $detail" 2>/dev/null || wall "$title: $detail"
+    return 0
 }
 
+# Resolve the desktop notifier: the configured binary first, then
+# notify-send. Prints the path, or fails if there is nothing usable.
+gui_notifier_path() {
+    if [[ -n "$NOTIFICATION_QTNOTIFIER" && -x "$NOTIFICATION_QTNOTIFIER" ]]; then
+        printf '%s\n' "$NOTIFICATION_QTNOTIFIER"
+        return 0
+    fi
 
-temp_raise_alarm() {
+    command -v notify-send 2>/dev/null && return 0
+
+    return 1
+}
+
+# Every active graphical session, one "uid user display" line each.
+gui_sessions() {
+    local sid key value
+    local uid user type state display
+
+    command -v loginctl >/dev/null 2>&1 || return 0
+
+    while read -r sid; do
+        [[ -n "$sid" ]] || continue
+
+        uid=""; user=""; type=""; state=""; display=""
+        while IFS='=' read -r key value; do
+            case "$key" in
+                User)    uid="$value" ;;
+                Name)    user="$value" ;;
+                Type)    type="$value" ;;
+                State)   state="$value" ;;
+                Display) display="$value" ;;
+            esac
+        done < <(loginctl show-session "$sid" \
+                     -p User -p Name -p Type -p State -p Display 2>/dev/null)
+
+        # Only graphical sessions can show a desktop notification, and only
+        # a live one is worth notifying (a closing session has no bus).
+        case "$type" in
+            x11|wayland|mir) ;;
+            *) continue ;;
+        esac
+        case "$state" in
+            active|online) ;;
+            *) continue ;;
+        esac
+
+        [[ "$uid" =~ ^[0-9]+$ ]] || continue
+        [[ -n "$user" ]] || continue
+
+        printf '%s %s %s\n' "$uid" "$user" "${display:-}"
+    done < <(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}')
+}
+
+# Run one notifier invocation inside a given user's session.
+gui_notify_session() {
+    local uid="$1"
+    local user="$2"
+    local display="$3"
+    local notifier="$4"
+    local title="$5"
+    local detail="$6"
+    local urgency="$7"
+    local -a env_args
+    local -a cmd
+
+    env_args=(
+        "XDG_RUNTIME_DIR=/run/user/$uid"
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus"
+    )
+    [[ -n "$display" ]] && env_args+=( "DISPLAY=$display" )
+
+    if [[ "$(basename "$notifier")" == "notify-send" ]]; then
+        cmd=( "$notifier" -a tempmon -u "$urgency" "$title" "$detail" )
+    else
+        cmd=( "$notifier" "$title" "$detail" )
+    fi
+
+    # Already the session's owner (standalone testing): run it directly.
+    if [[ "$(id -u)" == "$uid" ]]; then
+        env "${env_args[@]}" "${cmd[@]}" >/dev/null 2>&1
+        return $?
+    fi
+
+    # Otherwise we need to drop privileges into that session.
+    if command -v runuser >/dev/null 2>&1; then
+        runuser -u "$user" -- env "${env_args[@]}" "${cmd[@]}" >/dev/null 2>&1
+        return $?
+    fi
+
+    if command -v sudo >/dev/null 2>&1; then
+        sudo -n -u "$user" env "${env_args[@]}" "${cmd[@]}" >/dev/null 2>&1
+        return $?
+    fi
+
+    return 1
+}
+
+# Desktop notification in every active graphical session.
+gui_notify() {
+    local title="$1"
+    local detail="$2"
+    local urgency="$3"
+    local notifier uid user display
+    local sent=0
+    local seen=0
+
+    if ! notifier="$(gui_notifier_path)"; then
+        if (( GUI_WARNED == 0 )); then
+            log "no desktop notifier found (tried $NOTIFICATION_QTNOTIFIER and notify-send), gui notifications disabled, install libnotify-bin or set NOTIFICATION_QTNOTIFIER"
+            GUI_WARNED=1
+        fi
+        return 1
+    fi
+
+    while read -r uid user display; do
+        [[ -n "$uid" ]] || continue
+        seen=$(( seen + 1 ))
+        if gui_notify_session "$uid" "$user" "$display" "$notifier" \
+                              "$title" "$detail" "$urgency"; then
+            sent=$(( sent + 1 ))
+        else
+            log "desktop notification to $user (session uid $uid) failed"
+        fi
+    done < <(gui_sessions)
+
+    if (( seen == 0 )); then
+        if (( GUI_WARNED == 0 )); then
+            log "no active graphical session found, gui notification skipped"
+            GUI_WARNED=1
+        fi
+        return 1
+    fi
+
+    (( sent > 0 ))
+}
+
+# Fan one event out to the channels NOTIFICATION_TYPE selects.
+notify() {
+    local title="$1"
+    local detail="$2"
+    local urgency="${3:-normal}"
+
+    if notify_wants "$NOTIFY_BIT_TTY"; then
+        tty_notify "$title" "$detail"
+    fi
+
+    if notify_wants "$NOTIFY_BIT_GUI"; then
+        gui_notify "$title" "$detail" "$urgency"
+    fi
+
+    return 0
+}
+
+stamp_of() {
+    local now="$1"
+    date -d "@$now" '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
+        || date '+%Y-%m-%d %H:%M:%S'
+}
+
+raise_alarm() {
     local temp="$1"
-    local threshold="$2"
-    local hostname="$3"
-    local type="$4"
-    local ret
+    local now="$2"
 
-    ret=0
-    log "alert sent, temp=${temp}C threshold=${THRESHOLD_C}C"
+    log "threshold exceeded, temp=${temp}C threshold=${THRESHOLD_C}C notification_type=${NOTIFICATION_TYPE}"
 
-    if [[ "$type" == "0" ]]; then
-        ret=0
-    elif  [[ "$type" == "1" ]]; then
-        broadcast "$(printf 'TEMPERATURE WARNING on %s: %s C, threshold %s C exceeded at %s' "$(hostname)" "$temp" "$THRESHOLD_C" "$(date '+%Y-%m-%d %H:%M:%S')")"
-        ret=1
-    elif  [[ "$type" == "2" ]]; then
-        gui_broadcast "$(printf 'TEMPERATURE WARNING on %s: %s C, threshold %s C exceeded at %s' "$(hostname)" "$temp" "$THRESHOLD_C" "$(date '+%Y-%m-%d %H:%M:%S')")"
-        ret=1
-    elif  [[ "$type" == "3" ]]; then
-        broadcast "$(printf 'TEMPERATURE WARNING on %s: %s C, threshold %s C exceeded at %s' "$(hostname)" "$temp" "$THRESHOLD_C" "$(date '+%Y-%m-%d %H:%M:%S')")"
-        ret=1
+    notify "TEMPERATURE WARNING on $HOST_NAME" \
+           "$(printf '%s C, threshold %s C exceeded at %s' \
+                     "$temp" "$THRESHOLD_C" "$(stamp_of "$now")")" \
+           critical
+
+    LAST_ALERT_EPOCH="$now"
+}
+
+clear_alarm() {
+    local temp="$1"
+    local now="$2"
+
+    log "recovered, temp=${temp}C threshold=${THRESHOLD_C}C"
+
+    notify "TEMPERATURE NORMAL on $HOST_NAME" \
+           "$(printf '%s C, back under threshold %s C at %s' \
+                     "$temp" "$THRESHOLD_C" "$(stamp_of "$now")")" \
+           normal
+}
+
+# --test-notify: exercise the configured notification path once and exit.
+test_notify() {
+    local temp now
+
+    read_config
+
+    log "notification test: NOTIFICATION_TYPE=$NOTIFICATION_TYPE"
+    case "$NOTIFICATION_TYPE" in
+        0) log "type 0, log only, nothing will be sent" ;;
+        1) log "type 1, tty broadcast via wall" ;;
+        2) log "type 2, desktop notification only" ;;
+        3) log "type 3, tty broadcast and desktop notification" ;;
+    esac
+
+    if notify_wants "$NOTIFY_BIT_GUI"; then
+        local notifier
+        if notifier="$(gui_notifier_path)"; then
+            log "desktop notifier: $notifier"
+        fi
+        log "graphical sessions: $(gui_sessions | wc -l)"
     fi
-    
-    
-    last_alert_epoch="$now"
-    return $ret
+
+    now="$(date +%s)"
+    temp="$(get_temp_c)"
+    [[ -n "$temp" ]] || temp="0.0"
+
+    notify "TEMPMON TEST on $HOST_NAME" \
+           "$(printf 'test notification, current temp %s C, threshold %s C at %s' \
+                     "$temp" "$THRESHOLD_C" "$(stamp_of "$now")")" \
+           normal
+
+    log "notification test done"
+    return 0
+}
+
+usage() {
+    cat <<'USAGE'
+usage: tempmon.sh [--test-notify|--help]
+
+  (no argument)   poll the board temperature forever, alerting on threshold
+  --test-notify   send one test alert through the configured
+                  NOTIFICATION_TYPE, then exit
+  --help          this message
+
+config: /etc/tempmon/config.txt
+USAGE
 }
 
 cleanup() {
@@ -389,11 +652,6 @@ cleanup() {
 main() {
     local temp
     local now
-    local last_alert_epoch
-    local alerted
-
-    last_alert_epoch=0
-    alerted=0
 
     trap cleanup INT TERM
 
@@ -402,6 +660,8 @@ main() {
     read_config
     ensure_run_dir
     load_stats "$(date +%s)"
+
+    log "notification type $NOTIFICATION_TYPE, threshold ${THRESHOLD_C}C"
 
     while true; do
         read_config
@@ -424,23 +684,31 @@ main() {
         update_stats "$temp" "$now"
 
         if temp_ge_threshold "$temp" "$THRESHOLD_C"; then
-            if [[ "$alerted" -eq 0 ]] || (( now - last_alert_epoch >= REPEAT_INTERVAL_SEC )); then
-
-                
-                alerted=$(temp_raise_alarm "$temp" "$THRESHOLD_C" "$(date '+%Y-%m-%d %H:%M:%S')" "$NOTIFICATION_TYPE")
+            if (( ALERTED == 0 )) \
+               || (( now - LAST_ALERT_EPOCH >= REPEAT_INTERVAL_SEC )); then
+                raise_alarm "$temp" "$now"
             fi
+            ALERTED=1
         else
-            if [[ "$alerted" -eq 1 ]]; then
-                broadcast "$(printf 'TEMPERATURE NORMAL on %s: %s C, back under threshold %s C at %s' "$(hostname)" "$temp" "$THRESHOLD_C" "$(date '+%Y-%m-%d %H:%M:%S')")"
-                log "recovered, temp=${temp}C threshold=${THRESHOLD_C}C"
+            if (( ALERTED == 1 )); then
+                clear_alarm "$temp" "$now"
             fi
-            alerted=0
+            ALERTED=0
         fi
 
-        write_stats "$temp" "$now" "$alerted"
+        write_stats "$temp" "$now" "$ALERTED"
 
         sleep "$POLL_INTERVAL_SEC"
     done
 }
 
-main
+case "${1:-}" in
+    --test-notify) test_notify ;;
+    --help|-h)     usage ;;
+    "")            main ;;
+    *)
+        echo "tempmon: unknown argument: $1" >&2
+        usage >&2
+        exit 1
+        ;;
+esac
