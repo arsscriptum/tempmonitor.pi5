@@ -83,10 +83,12 @@
 # Delete temp_min (tempstats.sh --reset does this) to restart the min/max/
 # average window, the daemon reseeds from the next sample.
 #
-# Set TEMPMON_RUN_DIR in the environment to override RUN_DIR, useful for
-# running the daemon as a normal user during testing:
+# Set TEMPMON_RUN_DIR in the environment to override RUN_DIR, and
+# TEMPMON_CONFIG to read a different config file, both useful for running the
+# daemon as a normal user during testing:
 #
 #   TEMPMON_RUN_DIR=/tmp/tempmon ./tempmon.sh
+#   TEMPMON_CONFIG=./my.txt TEMPMON_RUN_DIR=/tmp/tempmon ./tempmon.sh --test-notify
 #
 # Usage:
 #   tempmon.sh                 poll forever (the service entry point)
@@ -98,7 +100,7 @@
 
 set -uo pipefail
 
-CONFIG_FILE="/etc/tempmon/config.txt"
+CONFIG_FILE="${TEMPMON_CONFIG:-/etc/tempmon/config.txt}"
 DEFAULT_THRESHOLD_C=75
 DEFAULT_POLL_INTERVAL_SEC=5
 DEFAULT_REPEAT_INTERVAL_SEC=300
