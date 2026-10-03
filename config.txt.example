@@ -27,7 +27,7 @@
 #                       bit 1 is desktop, so:
 #
 #                         0  no notification, log only
-#                         1  text message on every tty (wall)
+#                         1  text message on every tty
 #                         2  desktop notification in every graphical session
 #                         3  both
 #

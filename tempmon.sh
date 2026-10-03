@@ -31,7 +31,7 @@
 #                       is desktop, so:
 #
 #                         0  no notification, log only
-#                         1  text message on every tty (wall)
+#                         1  text message on every tty
 #                         2  desktop notification in every graphical session
 #                         3  both
 #
@@ -398,18 +398,39 @@ notify_wants() {
     (( (NOTIFICATION_TYPE & bit) != 0 ))
 }
 
-# Broadcast to every tty, the way shutdown warns all terminals.
+# Broadcast to every attached terminal by writing straight to the tty
+# device nodes. This deliberately does not use wall: on current util-linux
+# (Ubuntu 25.10 and the systemd releases built without utmp support) wall
+# enumerates targets from utmp, which no longer exists, so it reaches no one
+# and exits cleanly. Writing to the device nodes needs no utmp. As root the
+# write lands regardless of each terminal's mesg bit; as a normal user only
+# the terminals you own are writable, which is what you want for testing.
 tty_notify() {
     local title="$1"
     local detail="$2"
+    local msg
+    local t
+    local sent=0
 
-    if ! command -v wall >/dev/null 2>&1; then
-        log "wall not available, tty notification skipped"
+    # CR+LF on every line so the text renders cleanly even on a terminal in
+    # raw mode, and a BEL so an idle session gets an audible nudge. This is
+    # the banner wall used to print, formatted by hand.
+    msg="$(printf '\r\n\007*** %s ***\r\n%s\r\n\r\n' "$title" "$detail")"
+
+    # Pseudo-terminals (ssh, tmux, terminal emulators) plus the hardware
+    # virtual consoles. The [0-9]* globs match only numbered nodes, so they
+    # skip /dev/pts/ptmx, the bare /dev/tty, and named serial lines such as
+    # /dev/ttyAMA0 and /dev/ttyS0, none of which should be broadcast to.
+    for t in /dev/pts/[0-9]* /dev/tty[0-9]*; do
+        [[ -w "$t" ]] || continue
+        printf '%s' "$msg" > "$t" 2>/dev/null && sent=$(( sent + 1 ))
+    done
+
+    if (( sent == 0 )); then
+        log "no writable terminal found, tty notification skipped"
         return 1
     fi
 
-    # -n needs root and drops the banner, harmless to lose if unprivileged.
-    wall -n "$title: $detail" 2>/dev/null || wall "$title: $detail"
     return 0
 }
 
@@ -607,7 +628,7 @@ test_notify() {
     log "notification test: NOTIFICATION_TYPE=$NOTIFICATION_TYPE"
     case "$NOTIFICATION_TYPE" in
         0) log "type 0, log only, nothing will be sent" ;;
-        1) log "type 1, tty broadcast via wall" ;;
+        1) log "type 1, tty broadcast to terminal devices" ;;
         2) log "type 2, desktop notification only" ;;
         3) log "type 3, tty broadcast and desktop notification" ;;
     esac
