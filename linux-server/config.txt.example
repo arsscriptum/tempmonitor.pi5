@@ -1,0 +1,78 @@
+# srvtempmon config
+#
+# Copy to /etc/srvtempmon/config.txt (install_srvtempmon.sh does this
+# automatically on first install if the file does not already exist).
+#
+# THRESHOLD_C           temperature in Celsius that triggers an alert
+# POLL_INTERVAL_SEC     how often to check the temperature, in seconds
+# REPEAT_INTERVAL_SEC   minimum seconds between repeat alerts while the
+#                       server stays above threshold, prevents an alert
+#                       on every poll cycle while it stays hot
+# RUN_DIR               directory for the run files, must be an absolute
+#                       path. Created by the systemd unit as a tmpfs
+#                       directory removed when the service stops.
+#
+#                         $RUN_DIR/temp_cur     current temperature, C
+#                         $RUN_DIR/temp_min     lowest seen this window
+#                         $RUN_DIR/temp_max     highest seen this window
+#                         $RUN_DIR/temp_avg     mean of all samples
+#                         $RUN_DIR/temp_state   sample count, epochs, state
+#
+#                       One bare number per file, mode 0644 so any user can
+#                       read them. Report them with: srvtempstats
+#
+# NOTIFICATION_TYPE     where alerts go. Two bit field, bit 0 is tty and
+#                       bit 1 is desktop:
+#
+#                         0  no notification, log only
+#                         1  text message on every tty
+#                         2  desktop notification in every graphical session
+#                         3  both
+#
+#                       Type 0 still logs every threshold crossing.
+#                       A value outside 0-3 is ignored.
+#
+# NOTIFICATION_QTNOTIFIER
+#                       absolute path to a desktop notifier binary, called as:
+#                         <notifier> "<title>" "<message>"
+#                       Falls back to notify-send (apt install libnotify-bin).
+#
+# SENSOR_CHIP           lm-sensors chip name to query, e.g. coretemp-isa-0000.
+#                       Leave empty to auto-detect (highest reading across
+#                       all Package id / Core / Tdie / Tccd features on all
+#                       chips).  Run: sensors -u   to list chip names.
+#
+# SENSOR_FEATURE        Feature label within SENSOR_CHIP, e.g. "Package id 0".
+#                       Leave empty to auto-select the highest reading from the
+#                       chip.  Run: sensors   to list feature labels.
+#
+#                       Examples:
+#                         SENSOR_CHIP=coretemp-isa-0000
+#                         SENSOR_FEATURE=Package id 0
+#
+#                         SENSOR_CHIP=k10temp-pci-00c3
+#                         SENSOR_FEATURE=Tdie
+#
+#                       Leave both empty for auto-detection on most systems.
+#
+# HISTORY_FILE          Path to the history file (epoch:temp_c:sensor lines).
+#                       Entries older than HISTORY_DAYS are pruned at startup
+#                       and periodically. Must survive reboots — keep it in
+#                       /var/lib, not /run. The systemd unit creates
+#                       /var/lib/srvtempmon via StateDirectory.
+#
+# HISTORY_DAYS          How many days of history to keep. Default: 7.
+#                       Used by: srvtempstats --graph [MINUTES]
+#
+# Edited values take effect on the next poll cycle, no service restart needed.
+
+THRESHOLD_C=80
+POLL_INTERVAL_SEC=5
+REPEAT_INTERVAL_SEC=300
+RUN_DIR=/run/srvtempmon
+NOTIFICATION_TYPE=1
+NOTIFICATION_QTNOTIFIER=/bin/qtnotifier
+SENSOR_CHIP=
+SENSOR_FEATURE=
+HISTORY_FILE=/var/lib/srvtempmon/history.csv
+HISTORY_DAYS=7
